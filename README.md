@@ -1,1 +1,283 @@
-# gis-instruments
+# GIS технологии
+
+## 1. PostGIS
+**[PostGIS Tutorial](https://postgis.net/workshops/postgis-intro/)**
+#### PostGIS — это расширение с открытым исходным кодом для PostgreSQL. Он привносит в PostgreSQL три вещи, которые имеют решающее значение для работы с пространственными данными:
+- Поддержка типов пространственных данных (точки, линии, полигоны, растры).
+- Пространственные функции (подробнее о них ниже).
+- Пространственное индексирование, чтобы ваши пространственные запросы выполнялись быстро.
+
+PostGIS умеет работать с двумя типами координат: **GEOMETRY** и **GEOGRAPHY**. Вот в чем их разница:
+- **GEOMETRY** — для «плоских» вычислений, где форма Земли не учитывается. Это оптимально для локальных данных (например, в пределах одного города).
+- **GEOGRAPHY** — для сферических вычислений. Этот тип позволяет учитывать кривизну Земли и использовать геодезические координаты, что хорошо впишется для глобальных задач (например, расчёта расстояния между городами на разных континентах).
+### Типы геометрий
+#### Point
+A spatial point represents a single location on the Earth. This point is represented by a single coordinate (including either 2-, 3- or 4-dimensions). Points are used to represent objects when the exact details, such as shape and size, are not important at the target scale. For example, cities on a map of the world can be described as points, while a map of a single state might represent cities as polygons.
+```sql
+SELECT ST_AsText(geom)
+  FROM geometries
+  WHERE name = 'Point';
+```
+```sql
+POINT(0 0)
+```
+Some of the specific spatial functions for working with points are:
+- ST_X(geometry) returns the X ordinate
+- ST_Y(geometry) returns the Y ordinate
+#### LineString
+A linestring is a path between locations. It takes the form of an ordered series of two or more points. Roads and rivers are typically represented as linestrings. A linestring is said to be closed if it starts and ends on the same point. It is said to be simple if it does not cross or touch itself (except at its endpoints if it is closed). A linestring can be both closed and simple.
+
+The following SQL query will return the geometry associated with one linestring (in the ST_AsText column).
+```sql
+SELECT ST_AsText(geom)
+  FROM geometries
+  WHERE name = 'Linestring';
+```
+```sql
+LINESTRING(0 0, 1 1, 2 1, 2 2)
+```
+Some of the specific spatial functions for working with linestrings are:
+- ST_Length(geometry) returns the length of the linestring
+- ST_StartPoint(geometry) returns the first coordinate as a point
+- ST_EndPoint(geometry) returns the last coordinate as a point
+- ST_NPoints(geometry) returns the number of coordinates in the linestring
+#### Polygon
+```sql
+SELECT ST_AsText(geom)
+  FROM geometries
+  WHERE name LIKE 'Polygon%';
+```
+```sql
+POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))
+POLYGON((0 0, 10 0, 10 10, 0 10, 0 0),(1 1, 1 2, 2 2, 2 1, 1 1))
+```
+Some of the specific spatial functions for working with polygons are:
+- ST_Area(geometry) returns the area of the polygons
+- ST_NRings(geometry) returns the number of rings (usually 1, more if there are holes)
+- ST_ExteriorRing(geometry) returns the outer ring as a linestring
+- ST_InteriorRingN(geometry,n) returns a specified interior ring as a linestring
+- ST_Perimeter(geometry) returns the length of all the rings
+#### Collection
+There are four collection types, which group multiple simple geometries into sets.
+- **MultiPoint**, a collection of points
+- **MultiLineString**, a collection of linestrings
+- **MultiPolygon**, a collection of polygons
+- **GeometryCollection**, a heterogeneous collection of any geometry (including other collections)
+Our example collection contains a polygon and a point:
+```sql
+SELECT name, ST_AsText(geom)
+  FROM geometries
+  WHERE name = 'Collection';
+```
+```sql
+GEOMETRYCOLLECTION(POINT(2 0),POLYGON((0 0, 1 0, 1 1, 0 1, 0 0)))
+```
+### Создание геометрии
+Чтобы начать работу, создаем таблицу и добавляем GEOGRAPHY или GEOMETRY поля. Пример на GEOGRAPHY:
+```sql
+CREATE TABLE cafes (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(100),
+    location GEOGRAPHY(Point, 4326)
+);
+```
+Здесь GEOGRAPHY(Point, 4326) задаёт тип Point в системе координат 4326 (WGS 84, которая чаще всего используется в GPS и на картах).
+### Вставка данных: ST_SetSRID и ST_MakePoint
+Функции ST_MakePoint и ST_SetSRID — это базовые инструменты для работы с точками в PostGIS:
+- **ST_MakePoint(x, y)** — создаёт точку с координатами x (долгота) и y (широта). Но эта точка будет без системы координат.
+- **ST_SetSRID(geometry, srid)** — устанавливает систему координат для объекта. Для глобальных координат мы используем SRID 4326 (WGS 84).
+
+Пример вставки точек:
+```sql
+INSERT INTO cafes (name, location)
+VALUES
+('Кафе А', ST_SetSRID(ST_MakePoint(37.6173, 55.7558), 4326)),
+('Кафе Б', ST_SetSRID(ST_MakePoint(30.3351, 59.9343), 4326));
+```
+### Индексы: GIST и SP‑GiST
+Чтобы ускорить пространственные запросы, создаём индекс. 
+
+В PostGIS для геоданных используются индексы типа GIST и SP-GiST, которые оптимизированы для поиска по координатам и обработке пространственных данных.
+```sql
+CREATE INDEX idx_cafes_location ON cafes USING GIST (location);
+```
+Без индекса запросы на больших данных будут работать медленно. GIST — более распространённый индекс для большинства пространственных запросов, SP-GiST используется реже, но может в целом хорош для специфических структур данных, например, для структур данных, которые имеют иерархическую природу или нерегулярные разделения, например, для работы с неравномерными географическими зонами или деревьями.
+### Поиск ближайших объектов: ST_Distance и ST_DWithin
+Допустим, задача — найти ближайшие кафе в радиусе 5 км от заданной точки. Здесь хороши две функции:
+- **ST_Distance(geometry, geometry)** — вычисляет расстояние между двумя объектами. Если тип данных GEOGRAPHY, результат будет в метрах.
+- **ST_DWithin(geometry, geometry, distance)** — возвращает true, если объекты находятся в пределах заданного расстояния. Отличается от ST_Distance тем, что позволяет сразу фильтровать результаты.
+
+Пример запроса на ближайшие кафе в радиусе 5 км:
+```sql
+SELECT name, ST_Distance(location, ST_SetSRID(ST_MakePoint(37.6173, 55.7558), 4326)) AS distance
+FROM cafes
+WHERE ST_DWithin(location, ST_SetSRID(ST_MakePoint(37.6173, 55.7558), 4326), 5000)
+ORDER BY distance;
+```
+Здесь:
+- Используем ST_DWithin, чтобы найти все кафе в радиусе 5 км от точки (37.6173, 55.7558).
+- Сортируем результат по расстоянию (для этого используем ST_Distance).
+### Построение буферов и проверка пересечений
+Помимо поиска ближайших объектов, PostGIS поддерживает буферные зоны и операции с полигонами. Например:
+- **ST_Buffer(geometry, distance)** — создаёт буферную зону вокруг объекта (например, круг радиусом distance метров вокруг точки).
+- **ST_Intersects(geometry, geometry)** — проверяет, пересекаются ли два объекта.
+
+Пример: проверка, попадает ли кафе в буфер 2 км от точки:
+```sql
+SELECT name
+FROM cafes
+WHERE ST_Intersects(location, ST_Buffer(ST_SetSRID(ST_MakePoint(37.6173, 55.7558), 4326), 2000));
+```
+Этот запрос покажет кафе, которые находятся в пределах 2 км от заданной точки, используя буферную зону.
+### ST_Transform
+- **ST_SetSRID** не меняет координаты, но добавляет метаданные, чтобы указать, в какой пространственной системе отсчета на самом деле находятся координаты.
+- **ST_Transform** используется для изменения базовых координат из известной системы пространственной привязки в другую известную систему пространственной привязки.
+#### Примеры
+You forgot to specify the spatial reference system of your data or specified it wrong, but you know its WGS 84 long lat:
+```sql
+ALTER TABLE mytable
+ ALTER COLUMN geom TYPE geometry(MultiPolygon, 4326)
+  USING ST_SetSRID(geom, 4326);
+```
+Your data is WGS 84 long lat, and you tagged it correctly but you want it in US National Atlas meters:
+```sql
+ALTER TABLE mytable
+  ALTER COLUMN geom
+   TYPE geometry(MultiPolygon, 2163)
+  USING ST_Transform(geom, 2163);
+```
+### Пример создания таблицы (Django)
+В Django с расширением postgis можно работать, если поменять engine в сетапе для постгреса на **'django.contrib.gis.db.backends.postgis'**
+#### Хранение геометрии отрезка
+```python
+from django.contrib.gis.db import models
+
+class Data(models.Model):
+    geom = models.LineStringField(srid=3857, null=False, verbose_name='геометрия отрезка')
+    avg_cnt = models.IntegerField(null=False, verbose_name='среднее количество пешеходов на отрезке')
+```
+#### Хранение геометрии точки
+```python
+from django.contrib.gis.db import models
+
+class Data(models.Model):
+    geom = models.PointField(srid=3857, null=False, verbose_name='точка')
+    name = models.CharField(max_length=200, null=False, blank=False, verbose_name='название объекта')
+```
+
+## 2. Форматы wkt, ewkt, wkb, ewkb
+### WKT
+**WKT** — это стандартный текстовый формат для описания геометрических объектов, определенный в спецификации OGC (Open Geospatial Consortium). Этот формат позволяет легко хранить, передавать и интерпретировать геометрические данные.
+Примеры WKT:
+
+Точка (POINT):
+```python
+POINT(30 10)
+```
+Это точка с координатами (30, 10).
+
+Линия (LINESTRING):
+```python
+LINESTRING(30 10, 10 30, 40 40)
+```
+Это линия, проходящая через три точки: (30, 10), (10, 30) и (40, 40).
+
+Полигон (POLYGON):
+```python
+POLYGON((30 10, 40 40, 20 40, 10 20, 30 10))
+```
+Это замкнутый полигон с пятью вершинами. Первая и последняя точки совпадают, чтобы закрыть форму.
+
+Многоугольник (MULTIPOLYGON):
+```python
+MULTIPOLYGON(((30 20, 45 40, 10 40, 30 20)), ((15 5, 40 10, 10 20, 5 10, 15 5)))
+```
+Это коллекция из двух полигонов.
+### EWKT
+**EWKT** — это расширение формата WKT, которое добавляет дополнительную информацию о пространственной ссылке (Spatial Reference System, SRS) и/или метаданные к геометрическому объекту. EWKT часто используется в системах, таких как PostGIS, для явного указания системы координат.
+
+Точка с SRID:
+```python
+SRID=4326;POINT(30 10)
+```
+Это точка с координатами (30, 10) в системе координат WGS84 (EPSG:4326).
+
+Преимущества использования WKT и EWKT
+- Простота: Форматы WKT и EWKT легки для чтения и понимания человеком.
+- Стандартизация: WKT является частью стандарта OGC, что гарантирует совместимость между различными ГИС-системами.
+- Гибкость: EWKT позволяет явно указывать систему координат, что уменьшает вероятность ошибок при работе с геоданными.
+- Универсальность: Эти форматы поддерживаются большинством современных геоинформационных систем и баз данных.
+### WKB
+Форматы **WKB (Well-Known Binary)** и **EWKB (Extended Well-Known Binary)** являются бинарными представлениями геометрических объектов, которые используются для хранения и передачи пространственных данных. Они являются аналогами текстовых форматов WKT и EWKT, но более компактны и эффективны в обработке.
+
+#### WKB — это стандартный бинарный формат для описания геометрических объектов, определенный в спецификации OGC (Open Geospatial Consortium). Этот формат используется для хранения геометрических данных в базах данных, таких как PostgreSQL с расширением PostGIS, а также для передачи данных между системами.
+Для точки (30, 10) в Little Endian формате WKB будет выглядеть так:
+```python
+010100000000000000000024400000000000002440
+```
+- 01: Little Endian.
+- 01: Тип геометрии (POINT).
+- 0000000000002440: Координата X (30).
+- 0000000000002440: Координата Y (10).
+### EWKB
+#### EWKB — это расширение формата WKB, которое добавляет информацию о системе координат (Spatial Reference System, SRS) или другие метаданные к геометрическому объекту. EWKB часто используется в системах, таких как PostGIS, для явного указания системы координат.
+Пример EWKB для точки (1000000, 5000000) в EPSG:3857:
+```python
+01010000A0110F000000000000E8037B410000000000008AFF
+```
+Разбор EWKB:
+- 01: Little Endian.
+- 01: Тип геометрии (POINT).
+- A0110F0000: SRID (3857 в Little Endian).
+- 00000000E8037B41: Координата X (1000000 в формате IEEE 754 double precision).
+- 0000000000008AFF: Координата Y (5000000 в формате IEEE 754 double precision).
+
+## 3. Проекции 3857 4326
+**EPSG:4326** — географическая система координат, основанная на системе параметров WGS84. Единица измерения — градус.
+
+**EPSG:3857** — прямоугольная система координат, основанная на проекции Меркатора, построенной по системе параметров WGS84. Единица измерения – метр.
+#### EPSG:3857 — это плоская проекция, известная как Web Mercator или Spherical Mercator . Она преобразует сферическую поверхность Земли в плоскость, что позволяет использовать ее для веб-карт.
+#### Хорошо подходит для веб-карт, так как обеспечивает равномерное масштабирование при увеличении/уменьшении.
+
+## 4. Векторные и растровые форматы (карты)
+- **Векторные данные** – это тип географических данных, в котором информация хранится в виде набора точек, линий или полигонов, а также атрибутивных данных этих объектов.
+- **Растровые данные** – тип географических данных, в котором информация хранится в виде сетки из пикселей регулярного размера, и атрибутивные данные присвоены каждому пикселю. (Карта в виде спутникового снимка)
+![](1.png?raw=true "Title")
+
+
+
+
+## QGIS
+
+## mapbox
+
+## geopandas
+
+## gdal
+
+## shapely .shp
+
+## geopackage .gpkg
+
+## geojson
+
+
+
+## Векторные и растровые карты
+
+## graphhopper
+
+## geoserver (ImagePyramid)
+
+## h3
+
+## GEOTIFF
+
+## KML
+
+## OSM (open street map)
+
+## protobuf
+
+## plotly и matplotlib
+
